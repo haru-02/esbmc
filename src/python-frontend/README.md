@@ -6,11 +6,11 @@ The python frontend of ESBMC converts a given python code to pass the input pyth
 
 The rest of the ESBMC architecture then handles the conversion of this AST to GOTO statements and SSA (Single Static Assignments), which are then checked for satisfiability by converting them into SMT formulas. This documentation will cover the process of ast2json conversion, and how the given program is converted into an AST.
 
-![esbmc charts.png](./python-frontend/images/esbmc_charts.png)
+![esbmc charts.png](./images/esbmc_charts.png)
 
 ## The python frontend workflow
 
-![esbmc_architecture.png](./python-frontend/images/esbmc_architecture.png)
+![esbmc_architecture.png](./images/esbmc_architecture.png)
 
 The main files of the frontend are,
 
