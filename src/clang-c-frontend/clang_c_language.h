@@ -21,7 +21,7 @@ public:
 
   bool final(contextt &context) override;
 
-  bool typecheck(contextt &context, const std::string &module) override;
+  bool typecheck(contextt &context) override;
 
   std::string id() const override
   {
@@ -100,7 +100,7 @@ protected:
     return v;
   }
 
-  std::vector<std::unique_ptr<clang::ASTUnit>> ASTs;
+  std::unique_ptr<clang::ASTUnit> AST;
 };
 
 languaget *new_clang_c_language();
