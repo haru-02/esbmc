@@ -17,7 +17,7 @@ public:
 
   bool final(contextt &context) override;
 
-  bool typecheck(contextt &context) override;
+  bool typecheck(contextt &context, const std::string &module) override;
 
   std::string id() const override
   {
@@ -47,7 +47,7 @@ public:
   std::string smart_contract;
 
   // store AST json in nlohmann::json data structure
-  nlohmann::json src_ast_json;
+  nlohmann::json src_ast_json_array = nlohmann::json::array();
   nlohmann::json intrinsic_json;
 
   languaget *clang_c_module;
