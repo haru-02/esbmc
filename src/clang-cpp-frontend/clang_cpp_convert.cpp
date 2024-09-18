@@ -607,7 +607,8 @@ bool clang_cpp_convertert::get_expr(const clang::Stmt &stmt, exprt &new_expr)
       return true;
 
     typet type;
-    if (get_type(member_call.getType(), type))
+    clang::QualType qtype = member_call.getCallReturnType(*ASTContext);
+    if (get_type(qtype, type))
       return true;
 
     side_effect_expr_function_callt call;
@@ -795,7 +796,14 @@ bool clang_cpp_convertert::get_expr(const clang::Stmt &stmt, exprt &new_expr)
 
   case clang::Stmt::CXXPseudoDestructorExprClass:
   {
-    new_expr = exprt("pseudo_destructor");
+    const clang::CXXPseudoDestructorExpr &cxxpd =
+      static_cast<const clang::CXXPseudoDestructorExpr &>(stmt);
+    // A pseudo-destructor expression has no run-time semantics beyond evaluating the base expression.
+    exprt base;
+    if (get_expr(*cxxpd.getBase(), base))
+      return true;
+    new_expr = exprt("cpp-pseudo-destructor");
+    new_expr.move_to_operands(base);
     break;
   }
 
@@ -976,6 +984,34 @@ bool clang_cpp_convertert::get_expr(const clang::Stmt &stmt, exprt &new_expr)
     break;
   }
 
+  case clang::Stmt::LambdaExprClass:
+  {
+    const clang::LambdaExpr &lambda_expr =
+      static_cast<const clang::LambdaExpr &>(stmt);
+
+    if (lambda_expr.capture_size() > 0)
+    {
+      log_error("ESBMC does not support lambdas with captures for now");
+      return true;
+    }
+
+    get_struct_union_class(*lambda_expr.getLambdaClass());
+
+    // Construct a new object of the lambda class
+    typet lambda_class_type;
+    if (get_type(
+          *lambda_expr.getLambdaClass()->getTypeForDecl(), lambda_class_type))
+      return true;
+    new_expr = gen_zero(pointer_typet(lambda_class_type));
+    // Generating a null pointer only works as long as we don't have captures
+    // When we want to add support for captures, we have to probably call
+    // the lambda class constructor here
+    // See https://cppinsights.io/ which is a great tool to see how lambdas
+    // are translated to C++ code
+
+    break;
+  }
+
   default:
     if (clang_c_convertert::get_expr(stmt, new_expr))
       return true;
@@ -1118,84 +1154,170 @@ bool clang_cpp_convertert::get_function_body(
     const clang::CXXConstructorDecl &cxxcd =
       static_cast<const clang::CXXConstructorDecl &>(fd);
 
+    log_debug(
+      "c++",
+      "Class {} ctor {} has {} initializers",
+      cxxcd.getParent()->getNameAsString(),
+      cxxcd.getNameAsString(),
+      cxxcd.getNumCtorInitializers());
+
+    // Resize the number of operands
+    exprt::operandst initializers;
+    initializers.reserve(cxxcd.getNumCtorInitializers());
+
+    /* State to track initialization of array member initializers. */
+    symbolt *array_init_sym = nullptr; /* temp symbol for array init */
+    /* track whether the temp symbol is up to date. */
+    bool init_sym_uptodate = true;
+
     // Parse the initializers, if any
-    if (cxxcd.init_begin() != cxxcd.init_end())
+
+    // `init` type is clang::CXXCtorInitializer
+    for (auto init : cxxcd.inits())
     {
-      log_debug(
-        "c++",
-        "Class {} ctor {} has {} initializers",
-        cxxcd.getParent()->getNameAsString(),
-        cxxcd.getNameAsString(),
-        cxxcd.getNumCtorInitializers());
+      exprt initializer;
 
-      // Resize the number of operands
-      exprt::operandst initializers;
-      initializers.reserve(cxxcd.getNumCtorInitializers());
-
-      // `init` type is clang::CXXCtorInitializer
-      for (auto init : cxxcd.inits())
+      if (init->isDelegatingInitializer())
       {
-        exprt initializer;
+        /* The "A(1)" initializer here is a delegating initializer.
+         * There can only be one initializer in that case.
+         *
+         * struct A {
+         *   A() : A(1) {}
+         *   A(int);
+         * }
+         */
+        assert(cxxcd.getNumCtorInitializers() == 1);
 
-        if (!init->isBaseInitializer())
+        initializer.set(
+          "#delegating_ctor_this", ftype.arguments().at(0).get("#identifier"));
+        initializer.set("#delegating_ctor", 1);
+        if (get_expr(*init->getInit(), initializer))
+          return true;
+        initializers.push_back(initializer);
+        init_sym_uptodate = false;
+      }
+      else if (init->isBaseInitializer())
+      {
+        // Add additional annotation for `this` parameter
+        initializer.derived_this_arg(
+          ftype.arguments().at(0).get("#identifier"));
+        initializer.base_ctor_derived(true);
+        if (get_expr(*init->getInit(), initializer))
+          return true;
+        initializers.push_back(initializer);
+        init_sym_uptodate = false;
+      }
+      else if (init->isMemberInitializer())
+      {
+        // parsing non-static member initializer
+
+        exprt member;
+        member.set("#member_init", 1);
+        if (get_decl_ref(*init->getMember(), member))
+          return true;
+
+        build_member_from_component(fd, member);
+        // set #member_init flag again, as it has been cleared between the first call...
+        member.set("#member_init", 1);
+
+        exprt rhs;
+        rhs.set("#member_init", 1);
+        if (get_expr(*init->getInit(), rhs))
+          return true;
+
+        /* We can't assign to arrays, dereference() will choke. */
+        if (is_array_like(member.type()))
         {
-          if (init->isMemberInitializer())
-          {
-            exprt lhs;
-            lhs.set("#member_init", 1);
-            // parsing non-static member initializer
-            if (get_decl_ref(*init->getMember(), lhs))
-              return true;
+          /* Instead, introduce a single new symbol 'array_init$' of the class's
+           * type, and encode the following sequence:
+           *
+           *  0. array_init$ = *this;
+           *  1. array_init$.member = rhs;
+           *  2. *this = array_init$;
+           *
+           * Where possible, we leave out instruction 0, i.e., if the previous
+           * initializer already was an array and at the very beginning. This is
+           * tracked via the boolean 'init_sym_uptodate'.
+           *
+           * Step 2. is necessary after each member, because the next
+           * initializer can legally expect previous members obtained via the
+           * (this) pointer to have already been initialized. */
+          const exprt &this_ptr = member.op0(); /* the (this) pointer */
+          const struct_union_typet &this_type =
+            to_struct_union_type(ns.follow(this_ptr.type().subtype()));
 
-            build_member_from_component(fd, lhs);
-            // set #member_init flag again, as it has been cleared between the first call...
-            lhs.set("#member_init", 1);
-
-            exprt rhs;
-            rhs.set("#member_init", 1);
-            if (get_expr(*init->getInit(), rhs))
-              return true;
-
-            initializer = side_effect_exprt("assign", lhs.type());
-            initializer.copy_to_operands(lhs, rhs);
-          }
-          else if (init->isDelegatingInitializer())
+          if (!array_init_sym)
           {
-            initializer.set(
-              "#delegating_ctor_this",
-              ftype.arguments().at(0).get("#identifier"));
-            initializer.set("#delegating_ctor", 1);
-            if (get_expr(*init->getInit(), initializer))
-              return true;
+            symbolt new_symbol;
+            new_symbol.name = "array_init$";
+            new_symbol.id = id2string(this_ptr.identifier()) + "_array_init$";
+            new_symbol.type = this_type;
+            if (context.move(new_symbol, array_init_sym))
+            {
+              log_error(
+                "Duplicate temporary array symbol for initializer in {}",
+                __func__);
+              abort();
+            }
+            assert(array_init_sym);
           }
-          else
+
+          exprt this_sym = dereference_exprt(this_ptr, this_ptr.type());
+          exprt init_sym = symbol_expr(*array_init_sym);
+
+          if (!init_sym_uptodate)
           {
-            log_error("Unsupported initializer in {}", __func__);
-            abort();
+            /* 0. array_init$ = *this; */
+            side_effect_exprt update("assign", this_type);
+            update.copy_to_operands(init_sym, this_sym);
+            initializers.push_back(update);
+            init_sym_uptodate = true;
           }
+
+          exprt new_member = member;
+          new_member.op0() = init_sym;
+
+          /* 1. array_init$.member = rhs; */
+          initializer = side_effect_exprt("assign", new_member.type());
+          initializer.move_to_operands(new_member, rhs);
+          initializer.location() = new_expr.location();
+          initializers.push_back(initializer);
+
+          /* 2. *this = array_init$; */
+          initializer = side_effect_exprt("assign", this_sym.type());
+          initializer.move_to_operands(this_sym, init_sym);
+          initializer.location() = new_expr.location();
+          initializers.push_back(initializer);
         }
         else
         {
-          // Add additional annotation for `this` parameter
-          initializer.derived_this_arg(
-            ftype.arguments().at(0).get("#identifier"));
-          initializer.base_ctor_derived(true);
-          if (get_expr(*init->getInit(), initializer))
-            return true;
+          initializer = side_effect_exprt("assign", member.type());
+          initializer.move_to_operands(member, rhs);
+          initializer.location() = new_expr.location();
+          initializers.push_back(initializer);
+          init_sym_uptodate = false;
         }
-
-        // Convert to code and insert side-effect in the operands list
-        // Essentially we convert an initializer to assignment, e.g:
-        // t1() : i(2){ }
-        // is converted to
-        // t1() { this->i = 2; }
-        convert_expression_to_code(initializer);
-        initializers.push_back(initializer);
       }
+      else
+      {
+        log_error("Unsupported initializer in {}", __func__);
+        abort();
+      }
+    }
 
-      // Insert at the beginning of the body
-      body.operands().insert(
-        body.operands().begin(), initializers.begin(), initializers.end());
+    for (exprt &initializer : initializers)
+      convert_expression_to_code(initializer);
+
+    // Insert initializers at the beginning of the body
+    body.operands().insert(
+      body.operands().begin(), initializers.begin(), initializers.end());
+    if (array_init_sym)
+    {
+      /* Need to declare the temp symbol for array initialization if it has
+       * been used. */
+      code_declt init_decl(symbol_expr(*array_init_sym));
+      body.operands().insert(body.operands().begin(), init_decl);
     }
   }
 
@@ -1591,6 +1713,8 @@ bool clang_cpp_convertert::annotate_class_method(
   {
     // annotate ctor and dtor return type
     annotate_ctor_dtor_rtn_type(cxxmdd, component_type.return_type());
+    annotate_implicit_copy_move_ctor_union(
+      cxxmdd, component_type.return_type());
 
     /*
      * We also have a `component` in class type representing the ctor/dtor.
@@ -1817,19 +1941,20 @@ bool clang_cpp_convertert::is_duplicate_method(
   return false;
 }
 
-void clang_cpp_convertert::annotate_cpyctor(
+void clang_cpp_convertert::annotate_implicit_copy_move_ctor_union(
   const clang::CXXMethodDecl &cxxmdd,
-  typet &rtn_type)
+  typet &ctor_return_type)
 {
-  if (is_cpyctor(cxxmdd))
-    rtn_type.set("#copy_cons", true);
+  if (
+    is_copy_or_move_ctor(cxxmdd) && cxxmdd.isImplicit() &&
+    cxxmdd.getParent()->isUnion())
+    ctor_return_type.set("#implicit_union_copy_move_constructor", true);
 }
 
-bool clang_cpp_convertert::is_cpyctor(const clang::DeclContext &dcxt)
+bool clang_cpp_convertert::is_copy_or_move_ctor(const clang::DeclContext &dcxt)
 {
   if (const auto *ctor = llvm::dyn_cast<clang::CXXConstructorDecl>(&dcxt))
-    if (ctor->isCopyConstructor())
-      return true;
+    return ctor->isCopyOrMoveConstructor();
 
   return false;
 }
@@ -1851,7 +1976,6 @@ void clang_cpp_convertert::annotate_ctor_dtor_rtn_type(
                            ? "destructor"
                            : "constructor";
   typet tmp_rtn_type(mark_rtn);
-  annotate_cpyctor(cxxmdd, tmp_rtn_type);
   rtn_type = tmp_rtn_type;
 }
 

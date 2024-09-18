@@ -33,7 +33,7 @@ extern "C"
 #include <goto-programs/abstract-interpretation/interval_analysis.h>
 #include <goto-programs/abstract-interpretation/gcse.h>
 #include <goto-programs/loop_numbers.h>
-#include <goto-programs/read_goto_binary.h>
+#include <goto-programs/goto_binary_reader.h>
 #include <goto-programs/write_goto_binary.h>
 #include <goto-programs/remove_no_op.h>
 #include <goto-programs/remove_unreachable.h>
@@ -51,6 +51,7 @@ extern "C"
 #include <pointer-analysis/value_set_analysis.h>
 #include <util/symbol.h>
 #include <util/time_stopping.h>
+#include <goto-programs/goto_cfg.h>
 
 #ifndef _WIN32
 #  include <sys/wait.h>
@@ -587,7 +588,7 @@ int esbmc_parseoptionst::doit()
 
   // If no strategy is chosen, just rely on the simplifier
   // and the flags set through CMD
-  bmct bmc(goto_functions, options, context);
+  bmct bmc(goto_functions, options, cmdline.options_map, context);
   return do_bmc(bmc);
 }
 
@@ -927,7 +928,7 @@ int esbmc_parseoptionst::doit_k_induction_parallel()
     // 2. It couldn't find a bug
     for (BigInt k_step = 1; k_step <= max_k_step; k_step += k_step_inc)
     {
-      bmct bmc(goto_functions, options, context);
+      bmct bmc(goto_functions, options, cmdline.options_map, context);
       bmc.options.set_option("unwind", integer2string(k_step));
 
       log_status("Checking base case, k = {:d}\n", k_step);
@@ -1031,7 +1032,7 @@ int esbmc_parseoptionst::doit_k_induction_parallel()
     // 2. It couldn't find a proof
     for (BigInt k_step = 2; k_step <= max_k_step; k_step += k_step_inc)
     {
-      bmct bmc(goto_functions, options, context);
+      bmct bmc(goto_functions, options, cmdline.options_map, context);
       bmc.options.set_option("unwind", integer2string(k_step));
 
       log_status("Checking forward condition, k = {:d}", k_step);
@@ -1098,7 +1099,7 @@ int esbmc_parseoptionst::doit_k_induction_parallel()
     // 2. It couldn't find a proof
     for (BigInt k_step = 2; k_step <= max_k_step; k_step += k_step_inc)
     {
-      bmct bmc(goto_functions, options, context);
+      bmct bmc(goto_functions, options, cmdline.options_map, context);
 
       bmc.options.set_option("unwind", integer2string(k_step));
 
@@ -1269,7 +1270,7 @@ tvt esbmc_parseoptionst::is_base_case_violated(
   options.set_option("partial-loops", false);
   options.set_option("unwind", integer2string(k_step));
 
-  bmct bmc(goto_functions, options, context);
+  bmct bmc(goto_functions, options, cmdline.options_map, context);
 
   log_status("Checking base case, k = {:d}", k_step);
   switch (do_bmc(bmc))
@@ -1328,7 +1329,7 @@ tvt esbmc_parseoptionst::does_forward_condition_hold(
   options.set_option("no-assertions", true);
   options.set_option("unwind", integer2string(k_step));
 
-  bmct bmc(goto_functions, options, context);
+  bmct bmc(goto_functions, options, cmdline.options_map, context);
 
   log_progress("Checking forward condition, k = {:d}", k_step);
   auto res = do_bmc(bmc);
@@ -1395,7 +1396,7 @@ tvt esbmc_parseoptionst::is_inductive_step_violated(
   options.set_option("partial-loops", true);
   options.set_option("unwind", integer2string(k_step));
 
-  bmct bmc(goto_functions, options, context);
+  bmct bmc(goto_functions, options, cmdline.options_map, context);
 
   log_progress("Checking inductive step, k = {:d}", k_step);
   switch (do_bmc(bmc))
@@ -1602,9 +1603,10 @@ bool esbmc_parseoptionst::create_goto_program(
 bool esbmc_parseoptionst::read_goto_binary(goto_functionst &goto_functions)
 {
   log_progress("Reading GOTO program from file");
+  goto_binary_reader goto_reader;
   for (const auto &arg : cmdline.args)
   {
-    if (::read_goto_binary(arg, context, goto_functions))
+    if (goto_reader.read_goto_binary(arg, context, goto_functions))
     {
       log_error("Failed to open `{}'", arg);
       return true;
@@ -1969,6 +1971,13 @@ bool esbmc_parseoptionst::output_goto_program(
       log_status("{}", oss.str());
       if (cmdline.isset("goto-functions-only"))
         return true;
+    }
+
+    if (cmdline.isset("dump-goto-cfg"))
+    {
+      goto_cfg cfg(goto_functions);
+      cfg.dump_graph();
+      return true;
     }
 
     // Translate the GOTO program to C and output it into the log or

@@ -10,6 +10,7 @@
 class codet;
 class struct_typet;
 class function_id;
+class symbol_id;
 
 class python_converter
 {
@@ -25,6 +26,7 @@ private:
   void get_function_definition(const nlohmann::json &function_node);
   void
   get_class_definition(const nlohmann::json &class_node, codet &target_block);
+  std::string get_operand_type(const nlohmann::json &element);
 
   locationt get_location_from_decl(const nlohmann::json &ast_node);
   exprt get_expr(const nlohmann::json &element);
@@ -32,19 +34,22 @@ private:
   exprt get_binary_operator_expr(const nlohmann::json &element);
   exprt get_logical_operator_expr(const nlohmann::json &element);
   exprt get_conditional_stm(const nlohmann::json &ast_node);
-  function_id build_function_id(const nlohmann::json &element);
   exprt get_function_call(const nlohmann::json &ast_block);
   exprt get_literal(const nlohmann::json &element);
   exprt get_block(const nlohmann::json &ast_block);
 
-  const nlohmann::json
-  find_var_decl(const std::string &var_name, const nlohmann::json &json);
+  bool has_multiple_types(const nlohmann::json &container);
   void adjust_statement_types(exprt &lhs, exprt &rhs) const;
-  std::string create_symbol_id() const;
-  std::string create_symbol_id(const std::string &filename) const;
+
+  symbol_id build_function_id(const nlohmann::json &element);
+  symbol_id create_symbol_id() const;
+  symbol_id create_symbol_id(const std::string &filename) const;
+
   bool is_constructor_call(const nlohmann::json &json);
   typet get_typet(const std::string &ast_type, size_t type_size = 0);
   typet get_typet(const nlohmann::json &elem);
+  std::string get_var_type(const std::string &var_name) const;
+  typet get_list_type(const nlohmann::json &list);
   void get_attributes_from_self(
     const nlohmann::json &method_body,
     struct_typet &clazz);
@@ -55,8 +60,7 @@ private:
     std::string method_name,
     bool is_ctor) const;
 
-  symbolt *
-  find_function_in_imported_modules(const std::string &symbol_id) const;
+  symbolt *find_symbol_in_imported_modules(const std::string &symbol_id) const;
 
   symbolt *find_symbol_in_global_scope(std::string &symbol_id) const;
 
@@ -67,16 +71,26 @@ private:
 
   std::string get_classname_from_symbol_id(const std::string &symbol_id) const;
 
+  void append_models_from_directory(
+    std::list<std::string> &file_list,
+    const std::string &dir_path);
+
+  bool is_imported_module(const std::string &module_name);
+
   contextt &context;
   namespacet ns;
   typet current_element_type;
-  std::string python_filename;
+  std::string main_python_file;
+  std::string current_python_file;
   const nlohmann::json &ast_json;
+  nlohmann::json imported_module_json;
   std::string current_func_name;
   std::string current_class_name;
   exprt *ref_instance;
   bool is_converting_lhs = false;
   bool is_converting_rhs = false;
+  bool is_loading_models = false;
+  bool is_importing_module = false;
   bool base_ctor_called = false;
 
   // Map object to list of instance attributes

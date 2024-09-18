@@ -17,6 +17,7 @@ enum class StatementType
   IMPORT,
   BREAK,
   CONTINUE,
+  RAISE,
   UNKNOWN,
 };
 
@@ -30,14 +31,8 @@ enum class ExpressionType
   LITERAL,
   SUBSCRIPT,
   VARIABLE_REF,
+  LIST,
   UNKNOWN,
-};
-
-struct function_id
-{
-  std::string function_name;
-  std::string symbol_id;
-  std::string class_name;
 };
 
 bool is_builtin_type(const std::string &name);
@@ -46,5 +41,8 @@ bool is_builtin_type(const std::string &name);
 bool is_consensus_type(const std::string &name);
 
 bool is_consensus_func(const std::string &name);
+
+// Check if a function is defined in the "models" folder
+bool is_model_func(const std::string &name);
 
 std::string get_type_from_consensus_func(const std::string &name);

@@ -146,9 +146,15 @@ void goto_convertt::do_atomic_begin(
   // We should allow a context switch to happen before synchronization points.
   // In particular, here we force a context switch to happen before an atomic block
   // via the intrinsic function __ESBMC_yield();
-  code_function_callt call;
-  call.function() = symbol_expr(*context.find_symbol("c:@F@__ESBMC_yield"));
-  do_function_call(call.lhs(), call.function(), call.arguments(), dest);
+  if (
+    function.location().function() != "pthread_create" &&
+    function.location().function() != "pthread_join_noswitch" &&
+    function.location().function() != "pthread_trampoline")
+  {
+    code_function_callt call;
+    call.function() = symbol_expr(*context.find_symbol("c:@F@__ESBMC_yield"));
+    do_function_call(call.lhs(), call.function(), call.arguments(), dest);
+  }
 
   goto_programt::targett t = dest.add_instruction(ATOMIC_BEGIN);
   t->location = function.location();
@@ -862,6 +868,27 @@ void goto_convertt::do_function_call_symbol(
       migrate_expr(assign_expr, t->code);
       t->location = function.location();
     }
+  }
+  // Nontemporal means "do not cache please" (https://lwn.net/Articles/255364/)
+  else if (base_name == "__builtin_nontemporal_load")
+  {
+    // T __builtin_nontemporal_load(T *addr);
+    if (arguments.size() != 1)
+    {
+      log_error("`{}' expected to have one argument", id2string(base_name));
+      abort();
+    }
+
+    goto_programt::targett t_n = dest.add_instruction(ASSIGN);
+
+    exprt deref("dereference", lhs.type());
+    deref.copy_to_operands(arguments[0]);
+
+    exprt new_assign = code_assignt(lhs, deref);
+    expr2tc new_assign_expr;
+    migrate_expr(new_assign, new_assign_expr);
+    t_n->code = new_assign_expr;
+    t_n->location = function.location();
   }
   else
   {

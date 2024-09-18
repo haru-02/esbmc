@@ -237,6 +237,8 @@ void clang_c_adjust::adjust_side_effect(side_effect_exprt &expr)
       adjust_side_effect_statement_expression(expr);
     else if (statement == "gcc_conditional_expression")
     {
+      gen_typecast(ns, expr.op0(), expr.type());
+      gen_typecast(ns, expr.op1(), expr.type());
     }
     else if (statement == "nondet")
     {
@@ -1121,6 +1123,16 @@ void clang_c_adjust::do_special_functions(side_effect_expr_function_callt &expr)
       new_expr.operands() = expr.arguments();
       expr.swap(new_expr);
     }
+    else if (identifier == "__builtin_nontemporal_load")
+    {
+      // T __builtin_nontemporal_load(T *addr);
+      assert(expr.arguments().front().type().is_pointer());
+      typet t = to_pointer_type(expr.arguments().front().type()).subtype();
+      assert(
+        t.is_floatbv() || t.is_vector() || t.is_signedbv() ||
+        t.is_unsignedbv());
+      expr.type() = t;
+    }
   }
 
   // Restore location
@@ -1348,7 +1360,8 @@ void clang_c_adjust::adjust_if(exprt &expr)
 
   // Typecast both the true and false results
   // If the types are inconsistent
-  gen_typecast_arithmetic(ns, expr.op1(), expr.op2());
+  gen_typecast(ns, expr.op1(), expr.type());
+  gen_typecast(ns, expr.op2(), expr.type());
 }
 
 void clang_c_adjust::align_se_function_call_return_type(
